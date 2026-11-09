@@ -58,6 +58,16 @@ import {
   returnStep,
 } from "./motion";
 
+// ★ 抽出那块 cassette 上，贴在玻璃**外侧**（局部 z ≥ 0.178）的零件。
+//   封面退到玻璃后面（z=0.17）以后，这些零件会变成白块压在画上，
+//   所以只在抽出的这块上隐藏它们；阵列里的实例照常显示（从侧面看不出差别）。
+const EXTRACTED_FRONT_OVERLAYS = new Set([
+  "Printed_Label", // 左上标签牌 0.178~0.218
+  "Index_Inlay", // 索引条 0.202~0.206
+  "Titanium_Fasteners", // 螺丝 0.186~0.206
+  "Case_Engraving_Highlight", // 刻线高光 0.150~0.206
+]);
+
 const ease = (t: number) => {
   t = THREE.MathUtils.clamp(t, 0, 1);
   return t * t * t * (t * (t * 6 - 15) + 10);
@@ -406,17 +416,27 @@ export class ArchiveScene {
       if (name === "Frosted_Polymer") {
         // ★ 抽出的这块**不挂图集**：它的 UV 是 Blender 烘的，
         //   会把 70 格图集整张铺在卡面上（一格里出现好几只神兽 + 镜像字）。
-        //   封面改由前面的 selectedPanel 面片直贴 panels/{key}.jpg。
+        //   封面改由玻璃后面的 selectedPanel 面片直贴 panels/{key}.jpg。
         mat.map = null;
         mat.needsUpdate = true;
-        // 封面面片比盒面小一圈，露出的边也要是木色，不然会有一圈白边
-        mat.color.set("#3a2214");
-        mat.transmission = 0.9;
-        mat.thickness = 0.12;
-        mat.roughness = 0.21;
-        mat.ior = 1.46;
-        mat.attenuationColor = new THREE.Color("#eee6df");
-        mat.attenuationDistance = 2;
+        // ★ 玻璃必须清透，画在它后面才看得见。
+        //   原来是 #3a2214（深木色）+ roughness 0.21 的磨砂 → 画放后面会被糊掉。
+        mat.color.set("#f4f1ec");
+        mat.transmission = 0.94;
+        mat.thickness = 0.03;
+        // ★ roughness 决定"隔着玻璃看"有多糊：0.06 会让画面发灰，
+        //   降到 0.02 保留玻璃反光的同时画面依然通透。
+        mat.roughness = 0.02;
+        mat.ior = 1.5;
+        mat.attenuationColor = new THREE.Color("#ffffff");
+        mat.attenuationDistance = 4;
+        mat.transparent = false;
+        // ★ 让玻璃"看得见"：环境反射 + 一层清漆高光。
+        //   只靠 transmission 的话玻璃等于隐形，画面就成了贴纸。
+        mat.envMapIntensity = 1.35;
+        mat.clearcoat = 0.7;
+        mat.clearcoatRoughness = 0.04;
+        mat.specularIntensity = 0.45;
       }
       if (name === "Internal_Ceramic") {
         mat.color.set(this.lightingLook === "refined" ? "#c4baae" : "#c7beb6");
@@ -494,6 +514,10 @@ export class ArchiveScene {
       if (name === "Carbon_Ink") continue;
       const selectedMesh = new THREE.Mesh(geom, mat);
       selectedMesh.userData.surface = name;
+      // ★ 封面已经退到玻璃后面（z=0.17）。凡是凸在画面**前面**的零件
+      //   （标签牌 / 索引条 / 螺丝 / 刻线高光，z ≥ 0.178）都会变成白块糊在画上，
+      //   抽出这块直接不显示它们（阵列实例不受影响）。
+      if (EXTRACTED_FRONT_OVERLAYS.has(name)) selectedMesh.visible = false;
       selectedMesh.castShadow = name === "Optical_Diffuser";
       selectedMesh.receiveShadow = true;
       this.model.add(selectedMesh);
@@ -658,27 +682,67 @@ export class ArchiveScene {
     this.labelTexture.colorSpace = THREE.SRGBColorSpace;
     this.labelTexture.anisotropy =
       this.renderer.capabilities.getMaxAnisotropy();
-    // ★ 展框面板（抽出的这块）：单独一个面片贴在 cassette 的宽面（+Z）。
-    //   阵列里的板子走图集（Frosted_Polymer 材质 + 实例 UV），
-    //   抽出的这块用独立 mesh → 内容清晰、不被磨砂玻璃冲淡。
+    // ★ 展框面板（抽出的这块）：单独一个面片，**放进盒子里、玻璃后面**。
     this.selectedPanel = new THREE.Mesh(
       new THREE.PlaneGeometry(4.86, 3.66),
       new THREE.MeshBasicMaterial({
         color: 0xffffff,
         toneMapped: false,
-        transparent: true,
-        depthWrite: false,
+        // ★ 必须是不透明：three.js 的 transmission 只采样不透明通道，
+        //   transparent + depthWrite=false 的画挂到玻璃后面会采不到 → 一片黑。
+        transparent: false,
+        depthWrite: true,
         side: THREE.FrontSide,
       }),
     );
-    // ★ 贴住正面玻璃。实测各部件局部 z：
-    //   磨砂前盖 Frosted_Polymer 0.174~0.206、内置标签条到 0.246。
-    //   → 封面片放 0.252，只离面 6mm 级别（0.006），跟着板子一起转，
-    //     不会像 0.82 那样悬在盒外「浮」着，也不会像 0.12 那样被塞进盒子里。
-    this.selectedPanel.position.set(0, 1.85, 0.252);
+    // ★ 画放**玻璃后面**，这才是「装裱在展柜里」的样子。
+    //   实测各部件局部 z（+Z 朝观众）：
+    //     磨砂前盖 Frosted_Polymer 0.174 ~ 0.206  ← 玻璃
+    //     木框 Ivory_Edges          -0.130 ~ 0.197
+    //     内部光学件                 ~0.110 ~ 0.166
+    //     内置标签条 / 丝印         0.178 ~ 0.246
+    //   → 画放 0.170：在玻璃（0.174）内侧，又压在光学件（≤0.166）前面。
+    //     之前放 0.252 是在玻璃**外面**，所以才像一张贴上去的海报。
+    this.selectedPanel.position.set(0, 1.85, 0.17);
+    // ★ 玻璃在画上留下的层次：框的内阴影 + 玻璃自身的反光。
+    //   画是不受光的 MeshBasicMaterial，不加这两样就是一张纯平的图，
+    //   贴在哪儿都像海报；加了才有「凹进去、外面隔层玻璃」的读法。
+    const panelMat = this.selectedPanel.material as THREE.MeshBasicMaterial;
+    panelMat.onBeforeCompile = (shader) => {
+      shader.vertexShader =
+        "varying vec2 vPanelUv0;\n" + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        "#include <uv_vertex>",
+        "#include <uv_vertex>\nvPanelUv0 = uv;",
+      );
+      shader.fragmentShader =
+        "varying vec2 vPanelUv0;\n" + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <map_fragment>",
+        `#include <map_fragment>
+        {
+          // —— ① 框沿投在画上的内阴影：靠近边沿才压暗，往里迅速消失 ——
+          //   x 用 UV、y 按 4.86:3.66 版面比例换算，保证四边视觉等宽。
+          vec2 e = min(vPanelUv0, 1.0 - vPanelUv0);
+          float d = min(e.x * 1.328, e.y);
+          float occl = 1.0 - smoothstep(0.004, 0.058, d);
+          diffuseColor.rgb *= mix(1.0, 0.52, occl);
+          // —— ② 玻璃反光：两道斜向扫光（宽的一柔、窄的一锐）——
+          //   玻璃不可能完全无形；一片柔光 + 一条锐边才读得出「隔着一层」。
+          float g1 = vPanelUv0.x * 0.62 + (1.0 - vPanelUv0.y) * 0.78;
+          float soft = smoothstep(0.42, 0.0, abs(g1 - 0.20));
+          diffuseColor.rgb += vec3(0.115, 0.118, 0.122) * soft;
+          float g2 = vPanelUv0.x * 0.88 + (1.0 - vPanelUv0.y) * 0.46;
+          float sharp = smoothstep(0.055, 0.0, abs(g2 - 0.34));
+          diffuseColor.rgb += vec3(0.085, 0.086, 0.088) * sharp;
+          // —— ③ 透过玻璃看：整体略压一点，并偏极轻的冷调 ——
+          diffuseColor.rgb *= vec3(0.972, 0.980, 0.990);
+        }`,
+      );
+    };
     // 告诉 appearance：这块自带贴图，别套主题材质（否则暗色会反相）
     this.selectedPanel.userData.keepMaterial = true;
-    this.selectedPanel.renderOrder = 3;
+    this.selectedPanel.renderOrder = 0;
     this.selectedPanel.visible = false;
     this.model.add(this.selectedPanel);
     this.appearance.prepare(this.model);
